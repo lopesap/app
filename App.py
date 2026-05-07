@@ -65,10 +65,11 @@ def disparar(contatos, mensagem, url_imagem, intervalo, limite, campanha):
             break
 
         telefone = c.get("telefone", "")
-        nome     = c.get("nome", "Cliente")
-        imovel   = c.get("imovel", "imóvel")
 
-        msg_formatada = mensagem.format(nome=nome, imovel=imovel)
+        # Substituir todas as variáveis {{coluna}} pelos valores reais do contato
+        msg_formatada = mensagem
+        for chave, valor in c.items():
+            msg_formatada = msg_formatada.replace(f"{{{{{chave}}}}}", str(valor))
 
         payload = {
             "phone": telefone,
@@ -80,14 +81,16 @@ def disparar(contatos, mensagem, url_imagem, intervalo, limite, campanha):
             resp = requests.post(API_URL, json=payload, headers=headers, timeout=20)
             if resp.status_code == 200:
                 estado["enviados"] += 1
+                nome = c.get("Nome do cliente", c.get("nome", telefone))
                 estado["log"].append({"nome": nome, "telefone": telefone, "status": "enviado"})
                 ja_enviados.add(telefone)
             else:
                 estado["erros"] += 1
+                nome = c.get("Nome do cliente", c.get("nome", telefone))
                 estado["log"].append({"nome": nome, "telefone": telefone, "status": f"erro_{resp.status_code}"})
         except Exception as e:
             estado["erros"] += 1
-            estado["log"].append({"nome": nome, "telefone": telefone, "status": "excecao"})
+            estado["log"].append({"nome": telefone, "telefone": telefone, "status": "excecao"})
 
         time.sleep(intervalo)
 
@@ -120,24 +123,49 @@ def upload():
         else:
             df = pd.read_excel(arquivo, engine="openpyxl")
 
-        df[COLUNA_TELEFONE] = df[COLUNA_TELEFONE].astype(str).str.replace(r'\D', '', regex=True)
-        df = df[df[COLUNA_TELEFONE].str.len() >= 10]
+        # Detectar coluna de telefone automaticamente
+        col_tel = None
+        for c in df.columns:
+            if any(p in c.lower() for p in ['telefone', 'whatsapp', 'celular', 'fone', 'phone']):
+                col_tel = c
+                break
+
+        if not col_tel:
+            return jsonify({"erro": "Nenhuma coluna de telefone encontrada. Use 'Telefone', 'WhatsApp' ou 'Celular'."}), 400
+
+        df[col_tel] = df[col_tel].astype(str).str.replace(r'\D', '', regex=True)
+        df = df[df[col_tel].str.len() >= 10]
 
         progresso = carregar_progresso()
         ja_enviados = set(progresso["enviados"])
-        df = df[~df[COLUNA_TELEFONE].isin(ja_enviados)]
+        df = df[~df[col_tel].isin(ja_enviados)]
 
+        # Retornar todas as colunas disponíveis (exceto telefone)
+        colunas = [c for c in df.columns if c != col_tel]
+
+        # Montar contatos com todos os campos da planilha
         contatos = []
         for _, row in df.iterrows():
-            contatos.append({
-                "nome": str(row.get(COLUNA_NOME, "Cliente")).strip().title(),
-                "telefone": str(row[COLUNA_TELEFONE]),
-                "imovel": str(row.get(COLUNA_IMOVEL, "imóvel"))
+            contato = {"telefone": str(row[col_tel])}
+            for col in df.columns:
+                contato[col] = str(row[col]) if pd.notna(row[col]) else ''
+            contatos.append(contato)
+
+        # Preview: primeiros 5
+        preview = []
+        for c in contatos[:5]:
+            nome_col = next((k for k in c if any(p in k.lower() for p in ['nome', 'name', 'cliente'])), None)
+            imovel_col = next((k for k in c if any(p in k.lower() for p in ['imóvel', 'imovel', 'empreendimento', 'titulo', 'título'])), None)
+            preview.append({
+                "nome": c.get(nome_col, '-') if nome_col else '-',
+                "telefone": c["telefone"],
+                "imovel": c.get(imovel_col, '-') if imovel_col else '-'
             })
 
         return jsonify({
             "total": len(contatos),
-            "preview": contatos[:5],
+            "colunas": colunas,
+            "preview": preview,
             "contatos": contatos
         })
 
@@ -176,6 +204,34 @@ def status():
 def parar():
     estado["rodando"] = False
     return jsonify({"status": "Disparo interrompido"})
+
+@app.route("/relatorio-wpp", methods=["POST"])
+def relatorio_wpp():
+    data = request.json
+    mensagem = data.get("mensagem", "Relatório ZapImóvel")
+
+    SEU_NUMERO = "5511911402752"
+
+    headers = {
+        "Content-Type": "application/json",
+        "client-token": CLIENT_TOKEN
+    }
+
+    payload = {
+        "phone": SEU_NUMERO,
+        "message": mensagem
+    }
+
+    url_texto = f"https://api.z-api.io/instances/{INSTANCE_ID}/token/{TOKEN}/send-text"
+
+    try:
+        resp = requests.post(url_texto, json=payload, headers=headers, timeout=20)
+        if resp.status_code == 200:
+            return jsonify({"status": "Relatório enviado!"})
+        else:
+            return jsonify({"erro": resp.text}), 400
+    except Exception as e:
+        return jsonify({"erro": str(e)}), 500
 
 @app.route("/resetar", methods=["POST"])
 def resetar():
